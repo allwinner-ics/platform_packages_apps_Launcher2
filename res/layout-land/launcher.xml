@@ -53,7 +53,7 @@
         android:paddingLeft="@dimen/qsb_bar_height"
         android:paddingRight="@dimen/button_bar_height"
         launcher:defaultScreen="2"
-        launcher:cellCountX="4"
+        launcher:cellCountX="6"
         launcher:cellCountY="4"
         launcher:pageSpacing="@dimen/workspace_page_spacing"
         launcher:scrollIndicatorPaddingLeft="@dimen/qsb_bar_height"
