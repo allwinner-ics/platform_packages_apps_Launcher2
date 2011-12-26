@@ -284,16 +284,26 @@ public class CellLayout extends ViewGroup {
         mChildren.setCellDimensions(mCellWidth, mCellHeight, mWidthGap, mHeightGap);
         addView(mChildren);
     }
+    
+    static int px2dp(Resources r ,float pxValue){
+        final float scale = r.getDisplayMetrics().density;
+        return (int)(pxValue/scale + 0.5f);
+    }
+    
+    static int dp2px(Resources r,float dpValue){
+        final float scale = r.getDisplayMetrics().density;
+        return (int)(dpValue*scale + 0.5f);
+    }
 
     static int widthInPortrait(Resources r, int numCells) {
         // We use this method from Workspace to figure out how many rows/columns Launcher should
         // have. We ignore the left/right padding on CellLayout because it turns out in our design
         // the padding extends outside the visible screen size, but it looked fine anyway.
         int cellWidth = r.getDimensionPixelSize(R.dimen.workspace_cell_width);
-        int minGap = Math.min(r.getDimensionPixelSize(R.dimen.workspace_width_gap),
-                r.getDimensionPixelSize(R.dimen.workspace_height_gap));
+        int minGap = Math.min(px2dp(r,r.getDimensionPixelSize(R.dimen.workspace_width_gap)),
+                px2dp(r,r.getDimensionPixelSize(R.dimen.workspace_height_gap)));
 
-        return  minGap * (numCells - 1) + cellWidth * numCells;
+        return  minGap * (numCells - 1) + px2dp(r,cellWidth) * numCells;
     }
 
     static int heightInLandscape(Resources r, int numCells) {
@@ -301,10 +311,10 @@ public class CellLayout extends ViewGroup {
         // have. We ignore the left/right padding on CellLayout because it turns out in our design
         // the padding extends outside the visible screen size, but it looked fine anyway.
         int cellHeight = r.getDimensionPixelSize(R.dimen.workspace_cell_height);
-        int minGap = Math.min(r.getDimensionPixelSize(R.dimen.workspace_width_gap),
-                r.getDimensionPixelSize(R.dimen.workspace_height_gap));
+        int minGap = Math.min(px2dp(r,r.getDimensionPixelSize(R.dimen.workspace_width_gap)),
+                px2dp(r,r.getDimensionPixelSize(R.dimen.workspace_height_gap)));
 
-        return minGap * (numCells - 1) + cellHeight * numCells;
+        return  minGap * (numCells - 1) + px2dp(r,cellHeight) * numCells;
     }
 
     public void enableHardwareLayers() {

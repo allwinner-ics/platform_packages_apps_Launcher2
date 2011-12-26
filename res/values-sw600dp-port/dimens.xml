@@ -17,7 +17,7 @@
 <resources>
 <!-- AppsCustomize -->
     <dimen name="apps_customize_cell_width">96dp</dimen>
-    <dimen name="apps_customize_cell_height">96dp</dimen>
+    <dimen name="apps_customize_cell_height">102dp</dimen>
     <dimen name="workspace_page_spacing">64dp</dimen>
 
 <!-- Workspace -->
@@ -38,6 +38,7 @@
     <dimen name="apps_customize_pageLayoutPaddingBottom">10dp</dimen>
     <dimen name="apps_customize_pageLayoutPaddingLeft">10dp</dimen>
     <dimen name="apps_customize_pageLayoutPaddingRight">10dp</dimen>
+    <dimen name="apps_customize_tab_bar_height">72dp</dimen>
     <integer name="apps_customize_widget_cell_count_x">2</integer>
     <integer name="apps_customize_widget_cell_count_y">3</integer>
 </resources>
