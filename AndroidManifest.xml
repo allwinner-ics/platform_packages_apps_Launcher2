@@ -55,7 +55,8 @@
     <uses-permission android:name="android.permission.BIND_APPWIDGET" />
     <uses-permission android:name="com.android.launcher.permission.READ_SETTINGS" />
     <uses-permission android:name="com.android.launcher.permission.WRITE_SETTINGS" />
-
+	<uses-sdk android:minSdkVersion="4" 
+        android:targetSdkVersion="10"/>
     <application
         android:name="com.android.launcher2.LauncherApplication"
         android:label="@string/application_name"

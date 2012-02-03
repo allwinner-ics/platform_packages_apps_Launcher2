@@ -29,12 +29,14 @@ import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.SearchManager;
 import android.app.StatusBarManager;
+import android.appwidget.AppWidgetHostView;
 import android.appwidget.AppWidgetManager;
 import android.appwidget.AppWidgetProviderInfo;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipDescription;
+import android.content.ComponentCallbacks2;
 import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -75,9 +77,10 @@ import android.view.MenuItem;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.View;
-import android.view.ViewGroup;
-import android.view.WindowManager;
 import android.view.View.OnLongClickListener;
+import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
+import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.animation.AccelerateDecelerateInterpolator;
 import android.view.animation.AccelerateInterpolator;
@@ -160,6 +163,7 @@ public final class Launcher extends Activity
     private enum State { WORKSPACE, APPS_CUSTOMIZE, APPS_CUSTOMIZE_SPRING_LOADED };
     private State mState = State.WORKSPACE;
     private AnimatorSet mStateAnimation;
+    private AnimatorSet mDividerAnimator;
 
     static final int APPWIDGET_HOST_ID = 1024;
     private static final int EXIT_SPRINGLOADED_MODE_SHORT_TIMEOUT = 300;
@@ -176,8 +180,11 @@ public final class Launcher extends Activity
 
     private LayoutInflater mInflater;
 
-    private DragController mDragController;
     private Workspace mWorkspace;
+    private View mQsbDivider;
+    private View mDockDivider;
+    private DragLayer mDragLayer;
+    private DragController mDragController;
 
     private AppWidgetManager mAppWidgetManager;
     private LauncherAppWidgetHost mAppWidgetHost;
@@ -240,7 +247,6 @@ public final class Launcher extends Activity
 
     static final ArrayList<String> sDumpLogs = new ArrayList<String>();
 
-    private DragLayer mDragLayer;
 
     private BubbleTextView mWaitingForResume;
 
@@ -558,8 +564,26 @@ public final class Launcher extends Activity
         // When we resume Launcher, a different Activity might be responsible for the app
         // market intent, so refresh the icon
         updateAppMarketIcon();
+        mAppsCustomizeTabHost.onResume();
         if (!mWorkspaceLoading) {
-            mWorkspace.post(mBuildLayersRunnable);
+            final ViewTreeObserver observer = mWorkspace.getViewTreeObserver();
+            final Workspace workspace = mWorkspace;
+            // We want to let Launcher draw itself at least once before we force it to build
+            // layers on all the workspace pages, so that transitioning to Launcher from other
+            // apps is nice and speedy. Usually the first call to preDraw doesn't correspond to
+            // a true draw so we wait until the second preDraw call to be safe
+            observer.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+                boolean mFirstTime = true;
+                public boolean onPreDraw() {
+                    if (mFirstTime) {
+                        mFirstTime = false;
+                    } else {
+                        workspace.post(mBuildLayersRunnable);
+                        observer.removeOnPreDrawListener(this);
+                    }
+                    return true;
+                }
+            });
         }
         clearTypedText();
     }
@@ -725,6 +749,8 @@ public final class Launcher extends Activity
 
         mDragLayer = (DragLayer) findViewById(R.id.drag_layer);
         mWorkspace = (Workspace) mDragLayer.findViewById(R.id.workspace);
+        mQsbDivider = (ImageView) findViewById(R.id.qsb_divider);
+        mDockDivider = (ImageView) findViewById(R.id.dock_divider);
 
         // Setup the drag layer
         mDragLayer.setup(this, dragController);
@@ -849,6 +875,9 @@ public final class Launcher extends Activity
         boolean foundCellSpan = false;
 
         ShortcutInfo info = mModel.infoFromShortcutIntent(this, data, null);
+        if (info == null) {
+            return;
+        }
         final View view = createShortcut(info);
 
         // First we check if we already know the exact location where we want to add this item.
@@ -888,48 +917,12 @@ public final class Launcher extends Activity
         }
     }
 
-    class Padding {
-        int left = 0;
-        int right = 0;
-        int top = 0;
-        int bottom = 0;
-    }
-
-    Padding getPaddingForWidget(ComponentName component) {
-        PackageManager packageManager = getPackageManager();
-        Padding p = new Padding();
-        android.content.pm.ApplicationInfo appInfo;
-
-        try {
-            appInfo = packageManager.getApplicationInfo(component.getPackageName(), 0);
-        } catch (Exception e) {
-            // if we can't find the package, return 0 padding
-            return p;
-        }
-
-        if (appInfo.targetSdkVersion >= Build.VERSION_CODES.ICE_CREAM_SANDWICH) {
-            Resources r = getResources();
-            // The default padding values are private API currently, but will be added in
-            // API level 15. The current values are (8, 8, 8, 8).
-            p.left = r.getDimensionPixelSize(com.android.internal.
-                    R.dimen.default_app_widget_padding_left);
-            p.right = r.getDimensionPixelSize(com.android.internal.
-                    R.dimen.default_app_widget_padding_right);
-            p.top = r.getDimensionPixelSize(com.android.internal.
-                    R.dimen.default_app_widget_padding_top);
-            p.bottom = r.getDimensionPixelSize(com.android.internal.
-                    R.dimen.default_app_widget_padding_bottom);
-        }
-
-        return p;
-    }
-
     int[] getSpanForWidget(ComponentName component, int minWidth, int minHeight, int[] spanXY) {
         if (spanXY == null) {
             spanXY = new int[2];
         }
 
-        Padding padding = getPaddingForWidget(component);
+        Rect padding = AppWidgetHostView.getDefaultPaddingForWidget(this, component, null);
         // We want to account for the extra amount of padding that we are adding to the widget
         // to ensure that it gets the full amount of space that it has requested
         int requiredWidth = minWidth + padding.left + padding.right;
@@ -1322,11 +1315,12 @@ public final class Launcher extends Activity
             appSearchData = new Bundle();
             appSearchData.putString(Search.SOURCE, "launcher-search");
         }
+        Rect sourceBounds = mSearchDropTargetBar.getSearchBarBounds();
 
         final SearchManager searchManager =
                 (SearchManager) getSystemService(Context.SEARCH_SERVICE);
         searchManager.startSearch(initialQuery, selectInitialQuery, getComponentName(),
-            appSearchData, globalSearch);
+            appSearchData, globalSearch, sourceBounds);
     }
 
     @Override
@@ -1402,11 +1396,6 @@ public final class Launcher extends Activity
 
     public boolean isWorkspaceLocked() {
         return mWorkspaceLoading || mWaitingForResult;
-    }
-
-    private void addItems() {
-        showWorkspace(true);
-        showAddDialog();
     }
 
     private void resetAddInfo() {
@@ -1566,13 +1555,6 @@ public final class Launcher extends Activity
         sFolders.remove(folder.id);
     }
 
-    private void showNotifications() {
-        final StatusBarManager statusBar = (StatusBarManager) getSystemService(STATUS_BAR_SERVICE);
-        if (statusBar != null) {
-            statusBar.expand();
-        }
-    }
-
     private void startWallpaper() {
         showWorkspace(true);
         final Intent pickWallpaper = new Intent(Intent.ACTION_SET_WALLPAPER);
@@ -1720,6 +1702,8 @@ public final class Launcher extends Activity
      * @param v The view that was clicked.
      */
     public void onClickSearchButton(View v) {
+        v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+
         onSearchRequested();
     }
 
@@ -1729,10 +1713,8 @@ public final class Launcher extends Activity
      * @param v The view that was clicked.
      */
     public void onClickVoiceButton(View v) {
-        startVoiceSearch();
-    }
+        v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
 
-    private void startVoiceSearch() {
         Intent intent = new Intent(RecognizerIntent.ACTION_WEB_SEARCH);
         intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
         startActivity(intent);
@@ -1990,6 +1972,9 @@ public final class Launcher extends Activity
     Hotseat getHotseat() {
         return mHotseat;
     }
+    SearchDropTargetBar getSearchBar() {
+        return mSearchDropTargetBar;
+    }
 
     /**
      * Returns the CellLayout of the specified container at the specified screen.
@@ -2152,7 +2137,7 @@ public final class Launcher extends Activity
      * @param state The state that we are moving in or out of (eg. APPS_CUSTOMIZE)
      * @param scaleFactor The scale factor used for the zoom
      */
-    private void setPivotsForZoom(View view, State state, float scaleFactor) {
+    private void setPivotsForZoom(View view, float scaleFactor) {
         view.setPivotX(view.getWidth() / 2.0f);
         view.setPivotY(view.getHeight() / 2.0f);
     }
@@ -2167,309 +2152,7 @@ public final class Launcher extends Activity
     }
 
     /**
-     * Zoom the camera out from the workspace to reveal 'toView'.
-     * Assumes that the view to show is anchored at either the very top or very bottom
-     * of the screen.
-     * @param toState The state to zoom out to. Must be APPS_CUSTOMIZE.
-     */
-    private void cameraZoomOut(State toState, boolean animated, final boolean springLoaded) {
-        final Resources res = getResources();
-        final Launcher instance = this;
-
-        final int duration = res.getInteger(R.integer.config_appsCustomizeZoomInTime);
-        final int fadeDuration = res.getInteger(R.integer.config_appsCustomizeFadeInTime);
-        final float scale = (float) res.getInteger(R.integer.config_appsCustomizeZoomScaleFactor);
-        final View toView = mAppsCustomizeTabHost;
-        final int startDelay =
-                res.getInteger(R.integer.config_workspaceAppsCustomizeAnimationStagger);
-
-        setPivotsForZoom(toView, toState, scale);
-
-        // Shrink workspaces away if going to AppsCustomize from workspace
-        mWorkspace.changeState(Workspace.State.SMALL, animated);
-
-        if (animated) {
-            final ValueAnimator scaleAnim = ValueAnimator.ofFloat(0f, 1f).setDuration(duration);
-            scaleAnim.setInterpolator(new Workspace.ZoomOutInterpolator());
-            scaleAnim.addUpdateListener(new LauncherAnimatorUpdateListener() {
-                public void onAnimationUpdate(float a, float b) {
-                    ((View) toView.getParent()).invalidate();
-                    toView.fastInvalidate();
-                    toView.setFastScaleX(a * scale + b * 1f);
-                    toView.setFastScaleY(a * scale + b * 1f);
-                }
-            });
-
-            toView.setVisibility(View.VISIBLE);
-            toView.setFastAlpha(0f);
-            ValueAnimator alphaAnim = ValueAnimator.ofFloat(0f, 1f).setDuration(fadeDuration);
-            alphaAnim.setInterpolator(new DecelerateInterpolator(1.5f));
-            alphaAnim.addUpdateListener(new LauncherAnimatorUpdateListener() {
-                public void onAnimationUpdate(float a, float b) {
-                    // don't need to invalidate because we do so above
-                    toView.setFastAlpha(a * 0f + b * 1f);
-                }
-            });
-            alphaAnim.setStartDelay(startDelay);
-            alphaAnim.start();
-
-            if (toView instanceof LauncherTransitionable) {
-                ((LauncherTransitionable) toView).onLauncherTransitionStart(instance, scaleAnim,
-                        false);
-            }
-            scaleAnim.addListener(new AnimatorListenerAdapter() {
-                boolean animationCancelled = false;
-
-                @Override
-                public void onAnimationStart(Animator animation) {
-                    updateWallpaperVisibility(true);
-                    // Prepare the position
-                    toView.setTranslationX(0.0f);
-                    toView.setTranslationY(0.0f);
-                    toView.setVisibility(View.VISIBLE);
-                    toView.bringToFront();
-                }
-                @Override
-                public void onAnimationEnd(Animator animation) {
-                    // If we don't set the final scale values here, if this animation is cancelled
-                    // it will have the wrong scale value and subsequent cameraPan animations will
-                    // not fix that
-                    toView.setScaleX(1.0f);
-                    toView.setScaleY(1.0f);
-                    if (toView instanceof LauncherTransitionable) {
-                        ((LauncherTransitionable) toView).onLauncherTransitionEnd(instance,
-                                scaleAnim, false);
-                    }
-
-                    if (!springLoaded && !LauncherApplication.isScreenLarge()) {
-                        // Hide the workspace scrollbar
-                        mWorkspace.hideScrollingIndicator(true);
-                        mWorkspace.hideDockDivider(true);
-                    }
-                    if (!animationCancelled) {
-                        updateWallpaperVisibility(false);
-                    }
-                }
-
-                @Override
-                public void onAnimationCancel(Animator animation) {
-                    animationCancelled = true;
-                }
-            });
-
-            // toView should appear right at the end of the workspace shrink animation
-
-            if (mStateAnimation != null) mStateAnimation.cancel();
-            mStateAnimation = new AnimatorSet();
-            mStateAnimation.play(scaleAnim).after(startDelay);
-            mStateAnimation.start();
-        } else {
-            toView.setTranslationX(0.0f);
-            toView.setTranslationY(0.0f);
-            toView.setScaleX(1.0f);
-            toView.setScaleY(1.0f);
-            toView.setVisibility(View.VISIBLE);
-            toView.bringToFront();
-            if (toView instanceof LauncherTransitionable) {
-                ((LauncherTransitionable) toView).onLauncherTransitionStart(instance, null, false);
-                ((LauncherTransitionable) toView).onLauncherTransitionEnd(instance, null, false);
-
-                if (!springLoaded && !LauncherApplication.isScreenLarge()) {
-                    // Hide the workspace scrollbar
-                    mWorkspace.hideScrollingIndicator(true);
-                    mWorkspace.hideDockDivider(true);
-                }
-            }
-            updateWallpaperVisibility(false);
-        }
-    }
-
-    /**
-     * Zoom the camera back into the workspace, hiding 'fromView'.
-     * This is the opposite of cameraZoomOut.
-     * @param fromState The current state (must be APPS_CUSTOMIZE).
-     * @param animated If true, the transition will be animated.
-     */
-    private void cameraZoomIn(State fromState, boolean animated, final boolean springLoaded) {
-        Resources res = getResources();
-        final Launcher instance = this;
-
-        final int duration = res.getInteger(R.integer.config_appsCustomizeZoomOutTime);
-        final float scaleFactor = (float)
-                res.getInteger(R.integer.config_appsCustomizeZoomScaleFactor);
-        final View fromView = mAppsCustomizeTabHost;
-
-        setPivotsForZoom(fromView, fromState, scaleFactor);
-        updateWallpaperVisibility(true);
-        showHotseat(animated);
-        if (animated) {
-            if (mStateAnimation != null) mStateAnimation.cancel();
-            mStateAnimation = new AnimatorSet();
-
-            final float oldScaleX = fromView.getScaleX();
-            final float oldScaleY = fromView.getScaleY();
-
-            ValueAnimator scaleAnim = ValueAnimator.ofFloat(0f, 1f).setDuration(duration);
-            scaleAnim.setInterpolator(new Workspace.ZoomInInterpolator());
-            scaleAnim.addUpdateListener(new LauncherAnimatorUpdateListener() {
-                public void onAnimationUpdate(float a, float b) {
-                    ((View)fromView.getParent()).fastInvalidate();
-                    fromView.setFastScaleX(a * oldScaleX + b * scaleFactor);
-                    fromView.setFastScaleY(a * oldScaleY + b * scaleFactor);
-                }
-            });
-            final ValueAnimator alphaAnim = ValueAnimator.ofFloat(0f, 1f);
-            alphaAnim.setDuration(res.getInteger(R.integer.config_appsCustomizeFadeOutTime));
-            alphaAnim.setInterpolator(new AccelerateDecelerateInterpolator());
-            alphaAnim.addUpdateListener(new LauncherAnimatorUpdateListener() {
-                public void onAnimationUpdate(float a, float b) {
-                    // don't need to invalidate because we do so above
-                    fromView.setFastAlpha(a * 1f + b * 0f);
-                }
-            });
-            if (fromView instanceof LauncherTransitionable) {
-                ((LauncherTransitionable) fromView).onLauncherTransitionStart(instance, alphaAnim,
-                        true);
-            }
-            alphaAnim.addListener(new AnimatorListenerAdapter() {
-                @Override
-                public void onAnimationEnd(Animator animation) {
-                    updateWallpaperVisibility(true);
-                    fromView.setVisibility(View.GONE);
-                    if (fromView instanceof LauncherTransitionable) {
-                        ((LauncherTransitionable) fromView).onLauncherTransitionEnd(instance,
-                                alphaAnim, true);
-                    }
-                    mWorkspace.hideScrollingIndicator(false);
-                }
-            });
-
-            mStateAnimation.playTogether(scaleAnim, alphaAnim);
-            mStateAnimation.start();
-        } else {
-            fromView.setVisibility(View.GONE);
-            if (fromView instanceof LauncherTransitionable) {
-                ((LauncherTransitionable) fromView).onLauncherTransitionStart(instance, null, true);
-                ((LauncherTransitionable) fromView).onLauncherTransitionEnd(instance, null, true);
-            }
-        }
-    }
-
-    void showWorkspace(boolean animated) {
-        Resources res = getResources();
-        int stagger = res.getInteger(R.integer.config_appsCustomizeWorkspaceAnimationStagger);
-
-        mWorkspace.changeState(Workspace.State.NORMAL, animated, stagger);
-        if (mState == State.APPS_CUSTOMIZE) {
-            closeAllApps(animated);
-        }
-
-        mWorkspace.showDockDivider(!animated);
-        mWorkspace.flashScrollingIndicator();
-
-        // Change the state *after* we've called all the transition code
-        mState = State.WORKSPACE;
-
-        // Resume the auto-advance of widgets
-        mUserPresent = true;
-        updateRunning();
-
-        // send an accessibility event to announce the context change
-        getWindow().getDecorView().sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SELECTED);
-    }
-
-    void enterSpringLoadedDragMode() {
-        if (mState == State.APPS_CUSTOMIZE) {
-            mWorkspace.changeState(Workspace.State.SPRING_LOADED);
-            cameraZoomIn(State.APPS_CUSTOMIZE, true, true);
-            mState = State.APPS_CUSTOMIZE_SPRING_LOADED;
-        }
-    }
-
-    void exitSpringLoadedDragModeDelayed(final boolean successfulDrop, boolean extendedDelay) {
-        if (mState != State.APPS_CUSTOMIZE_SPRING_LOADED) return;
-
-        mHandler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (successfulDrop) {
-                    // Before we show workspace, hide all apps again because
-                    // exitSpringLoadedDragMode made it visible. This is a bit hacky; we should
-                    // clean up our state transition functions
-                    mAppsCustomizeTabHost.setVisibility(View.GONE);
-                    mSearchDropTargetBar.showSearchBar(true);
-                    showWorkspace(true);
-                } else {
-                    exitSpringLoadedDragMode();
-                }
-            }
-        }, (extendedDelay ?
-                EXIT_SPRINGLOADED_MODE_LONG_TIMEOUT :
-                EXIT_SPRINGLOADED_MODE_SHORT_TIMEOUT));
-    }
-    void exitSpringLoadedDragMode() {
-        if (mState == State.APPS_CUSTOMIZE_SPRING_LOADED) {
-            cameraZoomOut(State.APPS_CUSTOMIZE, true, true);
-            mState = State.APPS_CUSTOMIZE;
-        }
-        // Otherwise, we are not in spring loaded mode, so don't do anything.
-    }
-
-    public boolean isAllAppsCustomizeOpen() {
-        return mState == State.APPS_CUSTOMIZE;
-    }
-
-    /**
-     * Shows the hotseat area.
-     */
-    void showHotseat(boolean animated) {
-        if (!LauncherApplication.isScreenLarge()) {
-            if (animated) {
-                int duration = mSearchDropTargetBar.getTransitionInDuration();
-                mHotseat.animate().alpha(1f).setDuration(duration);
-            } else {
-                mHotseat.setAlpha(1f);
-            }
-        }
-    }
-
-    /**
-     * Hides the hotseat area.
-     */
-    void hideHotseat(boolean animated) {
-        if (!LauncherApplication.isScreenLarge()) {
-            if (animated) {
-                int duration = mSearchDropTargetBar.getTransitionOutDuration();
-                mHotseat.animate().alpha(0f).setDuration(duration);
-            } else {
-                mHotseat.setAlpha(0f);
-            }
-        }
-    }
-
-    void showAllApps(boolean animated) {
-        if (mState != State.WORKSPACE) return;
-
-        cameraZoomOut(State.APPS_CUSTOMIZE, animated, false);
-        mAppsCustomizeTabHost.requestFocus();
-
-        // Hide the search bar and hotseat
-        mSearchDropTargetBar.hideSearchBar(animated);
-
-        // Change the state *after* we've called all the transition code
-        mState = State.APPS_CUSTOMIZE;
-
-        // Pause the auto-advance of widgets until we are out of AllApps
-        mUserPresent = false;
-        updateRunning();
-        closeFolder();
-
-        // Send an accessibility event to announce the context change
-        getWindow().getDecorView().sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SELECTED);
-    }
-
-    /**
-     * Things to test when changing this code.
+     * Things to test when changing the following seven functions.
      *   - Home from workspace
      *          - from center screen
      *          - from other screens
@@ -2507,17 +2190,328 @@ public final class Launcher extends Activity
      *          - From the center workspace
      *          - From another workspace
      */
-    void closeAllApps(boolean animated) {
-        if (mState == State.APPS_CUSTOMIZE || mState == State.APPS_CUSTOMIZE_SPRING_LOADED) {
+
+    /**
+     * Zoom the camera out from the workspace to reveal 'toView'.
+     * Assumes that the view to show is anchored at either the very top or very bottom
+     * of the screen.
+     */
+    private void showAppsCustomizeHelper(boolean animated, final boolean springLoaded) {
+        if (mStateAnimation != null) {
+            mStateAnimation.cancel();
+            mStateAnimation = null;
+        }
+        final Resources res = getResources();
+        final Launcher instance = this;
+
+        final int duration = res.getInteger(R.integer.config_appsCustomizeZoomInTime);
+        final int fadeDuration = res.getInteger(R.integer.config_appsCustomizeFadeInTime);
+        final float scale = (float) res.getInteger(R.integer.config_appsCustomizeZoomScaleFactor);
+        final View toView = mAppsCustomizeTabHost;
+        final int startDelay =
+                res.getInteger(R.integer.config_workspaceAppsCustomizeAnimationStagger);
+
+        setPivotsForZoom(toView, scale);
+
+        // Shrink workspaces away if going to AppsCustomize from workspace
+        mWorkspace.changeState(Workspace.State.SMALL, animated);
+
+        if (animated) {
+            final ValueAnimator scaleAnim = ValueAnimator.ofFloat(0f, 1f).setDuration(duration);
+            scaleAnim.setInterpolator(new Workspace.ZoomOutInterpolator());
+            scaleAnim.addUpdateListener(new LauncherAnimatorUpdateListener() {
+                public void onAnimationUpdate(float a, float b) {
+                    toView.setScaleX(a * scale + b * 1f);
+                    toView.setScaleY(a * scale + b * 1f);
+                }
+            });
+
+            toView.setVisibility(View.VISIBLE);
+            toView.setAlpha(0f);
+            ValueAnimator alphaAnim = ValueAnimator.ofFloat(0f, 1f).setDuration(fadeDuration);
+            alphaAnim.setInterpolator(new DecelerateInterpolator(1.5f));
+            alphaAnim.addUpdateListener(new LauncherAnimatorUpdateListener() {
+                public void onAnimationUpdate(float a, float b) {
+                    // don't need to invalidate because we do so above
+                    toView.setAlpha(a * 0f + b * 1f);
+                }
+            });
+            alphaAnim.setStartDelay(startDelay);
+            alphaAnim.start();
+
+            scaleAnim.addListener(new AnimatorListenerAdapter() {
+                boolean animationCancelled = false;
+
+                @Override
+                public void onAnimationStart(Animator animation) {
+                    updateWallpaperVisibility(true);
+                    // Prepare the position
+                    toView.setTranslationX(0.0f);
+                    toView.setTranslationY(0.0f);
+                    toView.setVisibility(View.VISIBLE);
+                    toView.bringToFront();
+                }
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    // If we don't set the final scale values here, if this animation is cancelled
+                    // it will have the wrong scale value and subsequent cameraPan animations will
+                    // not fix that
+                    toView.setScaleX(1.0f);
+                    toView.setScaleY(1.0f);
+                    if (toView instanceof LauncherTransitionable) {
+                        ((LauncherTransitionable) toView).onLauncherTransitionEnd(instance,
+                                scaleAnim, false);
+                    }
+
+                    if (!springLoaded && !LauncherApplication.isScreenLarge()) {
+                        // Hide the workspace scrollbar
+                        mWorkspace.hideScrollingIndicator(true);
+                        hideDockDivider();
+                    }
+                    if (!animationCancelled) {
+                        updateWallpaperVisibility(false);
+                    }
+                }
+
+                @Override
+                public void onAnimationCancel(Animator animation) {
+                    animationCancelled = true;
+                }
+            });
+
+            // toView should appear right at the end of the workspace shrink animation
+            mStateAnimation = new AnimatorSet();
+            mStateAnimation.play(scaleAnim).after(startDelay);
+
+            boolean delayAnim = false;
+            if (toView instanceof LauncherTransitionable) {
+                LauncherTransitionable lt = (LauncherTransitionable) toView;
+                delayAnim = lt.onLauncherTransitionStart(instance, mStateAnimation, false);
+            }
+            // if the anim is delayed, the LauncherTransitionable is responsible for starting it
+            if (!delayAnim) {
+                // TODO: q-- what if this anim is cancelled before being started? or started after
+                // being cancelled?
+                mStateAnimation.start();
+            }
+        } else {
+            toView.setTranslationX(0.0f);
+            toView.setTranslationY(0.0f);
+            toView.setScaleX(1.0f);
+            toView.setScaleY(1.0f);
+            toView.setVisibility(View.VISIBLE);
+            toView.bringToFront();
+            if (toView instanceof LauncherTransitionable) {
+                ((LauncherTransitionable) toView).onLauncherTransitionStart(instance, null, false);
+                ((LauncherTransitionable) toView).onLauncherTransitionEnd(instance, null, false);
+
+                if (!springLoaded && !LauncherApplication.isScreenLarge()) {
+                    // Hide the workspace scrollbar
+                    mWorkspace.hideScrollingIndicator(true);
+                    hideDockDivider();
+                }
+            }
+            updateWallpaperVisibility(false);
+        }
+    }
+
+    /**
+     * Zoom the camera back into the workspace, hiding 'fromView'.
+     * This is the opposite of showAppsCustomizeHelper.
+     * @param animated If true, the transition will be animated.
+     */
+    private void hideAppsCustomizeHelper(boolean animated, final boolean springLoaded) {
+        if (mStateAnimation != null) {
+            mStateAnimation.cancel();
+            mStateAnimation = null;
+        }
+        Resources res = getResources();
+        final Launcher instance = this;
+
+        final int duration = res.getInteger(R.integer.config_appsCustomizeZoomOutTime);
+        final float scaleFactor = (float)
+                res.getInteger(R.integer.config_appsCustomizeZoomScaleFactor);
+        final View fromView = mAppsCustomizeTabHost;
+
+        setPivotsForZoom(fromView, scaleFactor);
+        updateWallpaperVisibility(true);
+        showHotseat(animated);
+        if (animated) {
+            final float oldScaleX = fromView.getScaleX();
+            final float oldScaleY = fromView.getScaleY();
+
+            ValueAnimator scaleAnim = ValueAnimator.ofFloat(0f, 1f).setDuration(duration);
+            scaleAnim.setInterpolator(new Workspace.ZoomInInterpolator());
+            scaleAnim.addUpdateListener(new LauncherAnimatorUpdateListener() {
+                public void onAnimationUpdate(float a, float b) {
+                    fromView.setScaleX(a * oldScaleX + b * scaleFactor);
+                    fromView.setScaleY(a * oldScaleY + b * scaleFactor);
+                }
+            });
+            final ValueAnimator alphaAnim = ValueAnimator.ofFloat(0f, 1f);
+            alphaAnim.setDuration(res.getInteger(R.integer.config_appsCustomizeFadeOutTime));
+            alphaAnim.setInterpolator(new AccelerateDecelerateInterpolator());
+            alphaAnim.addUpdateListener(new LauncherAnimatorUpdateListener() {
+                public void onAnimationUpdate(float a, float b) {
+                    fromView.setAlpha(a * 1f + b * 0f);
+                }
+            });
+            if (fromView instanceof LauncherTransitionable) {
+                ((LauncherTransitionable) fromView).onLauncherTransitionStart(instance, alphaAnim,
+                        true);
+            }
+            alphaAnim.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    updateWallpaperVisibility(true);
+                    fromView.setVisibility(View.GONE);
+                    if (fromView instanceof LauncherTransitionable) {
+                        ((LauncherTransitionable) fromView).onLauncherTransitionEnd(instance,
+                                alphaAnim, true);
+                    }
+                    mWorkspace.hideScrollingIndicator(false);
+                }
+            });
+
+            mStateAnimation = new AnimatorSet();
+            mStateAnimation.playTogether(scaleAnim, alphaAnim);
+            mStateAnimation.start();
+        } else {
+            fromView.setVisibility(View.GONE);
+            if (fromView instanceof LauncherTransitionable) {
+                ((LauncherTransitionable) fromView).onLauncherTransitionStart(instance, null, true);
+                ((LauncherTransitionable) fromView).onLauncherTransitionEnd(instance, null, true);
+            }
+            mWorkspace.hideScrollingIndicator(false);
+        }
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+            mAppsCustomizeTabHost.onTrimMemory();
+        }
+    }
+
+    void showWorkspace(boolean animated) {
+        Resources res = getResources();
+        int stagger = res.getInteger(R.integer.config_appsCustomizeWorkspaceAnimationStagger);
+
+        mWorkspace.changeState(Workspace.State.NORMAL, animated, stagger);
+        if (mState != State.WORKSPACE) {
             mWorkspace.setVisibility(View.VISIBLE);
-            cameraZoomIn(State.APPS_CUSTOMIZE, animated, false);
+            hideAppsCustomizeHelper(animated, false);
 
             // Show the search bar and hotseat
             mSearchDropTargetBar.showSearchBar(animated);
+            // We only need to animate in the dock divider if we're going from spring loaded mode
+            showDockDivider(animated && mState == State.APPS_CUSTOMIZE_SPRING_LOADED);
 
             // Set focus to the AppsCustomize button
             if (mAllAppsButton != null) {
                 mAllAppsButton.requestFocus();
+            }
+        }
+
+        mWorkspace.flashScrollingIndicator(animated);
+
+        // Change the state *after* we've called all the transition code
+        mState = State.WORKSPACE;
+
+        // Resume the auto-advance of widgets
+        mUserPresent = true;
+        updateRunning();
+
+        // send an accessibility event to announce the context change
+        getWindow().getDecorView().sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SELECTED);
+    }
+
+    void showAllApps(boolean animated) {
+        if (mState != State.WORKSPACE) return;
+
+        showAppsCustomizeHelper(animated, false);
+        mAppsCustomizeTabHost.requestFocus();
+
+        // Hide the search bar and hotseat
+        mSearchDropTargetBar.hideSearchBar(animated);
+
+        // Change the state *after* we've called all the transition code
+        mState = State.APPS_CUSTOMIZE;
+
+        // Pause the auto-advance of widgets until we are out of AllApps
+        mUserPresent = false;
+        updateRunning();
+        closeFolder();
+
+        // Send an accessibility event to announce the context change
+        getWindow().getDecorView().sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SELECTED);
+    }
+
+    void enterSpringLoadedDragMode() {
+        if (mState == State.APPS_CUSTOMIZE) {
+            mWorkspace.changeState(Workspace.State.SPRING_LOADED);
+            hideAppsCustomizeHelper(true, true);
+            hideDockDivider();
+            mState = State.APPS_CUSTOMIZE_SPRING_LOADED;
+        }
+    }
+
+    void exitSpringLoadedDragModeDelayed(final boolean successfulDrop, boolean extendedDelay) {
+        if (mState != State.APPS_CUSTOMIZE_SPRING_LOADED) return;
+
+        mHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (successfulDrop) {
+                    // Before we show workspace, hide all apps again because
+                    // exitSpringLoadedDragMode made it visible. This is a bit hacky; we should
+                    // clean up our state transition functions
+                    mAppsCustomizeTabHost.setVisibility(View.GONE);
+                    mSearchDropTargetBar.showSearchBar(true);
+                    showWorkspace(true);
+                } else {
+                    exitSpringLoadedDragMode();
+                }
+            }
+        }, (extendedDelay ?
+                EXIT_SPRINGLOADED_MODE_LONG_TIMEOUT :
+                EXIT_SPRINGLOADED_MODE_SHORT_TIMEOUT));
+    }
+
+    void exitSpringLoadedDragMode() {
+        if (mState == State.APPS_CUSTOMIZE_SPRING_LOADED) {
+            final boolean animated = true;
+            final boolean springLoaded = true;
+            showAppsCustomizeHelper(animated, springLoaded);
+            mState = State.APPS_CUSTOMIZE;
+        }
+        // Otherwise, we are not in spring loaded mode, so don't do anything.
+    }
+
+    void hideDockDivider() {
+        if (mQsbDivider != null && mDockDivider != null) {
+            mQsbDivider.setVisibility(View.INVISIBLE);
+            mDockDivider.setVisibility(View.INVISIBLE);
+        }
+    }
+
+    void showDockDivider(boolean animated) {
+        if (mQsbDivider != null && mDockDivider != null) {
+            mQsbDivider.setVisibility(View.VISIBLE);
+            mDockDivider.setVisibility(View.VISIBLE);
+            if (mDividerAnimator != null) {
+                mDividerAnimator.cancel();
+                mQsbDivider.setAlpha(1f);
+                mDockDivider.setAlpha(1f);
+                mDividerAnimator = null;
+            }
+            if (animated) {
+                mDividerAnimator = new AnimatorSet();
+                mDividerAnimator.playTogether(ObjectAnimator.ofFloat(mQsbDivider, "alpha", 1f),
+                        ObjectAnimator.ofFloat(mDockDivider, "alpha", 1f));
+                mDividerAnimator.setDuration(mSearchDropTargetBar.getTransitionInDuration());
+                mDividerAnimator.start();
             }
         }
     }
@@ -2530,6 +2524,38 @@ public final class Launcher extends Activity
         // TODO
     }
 
+    public boolean isAllAppsCustomizeOpen() {
+        return mState == State.APPS_CUSTOMIZE;
+    }
+
+    /**
+     * Shows the hotseat area.
+     */
+    void showHotseat(boolean animated) {
+        if (!LauncherApplication.isScreenLarge()) {
+            if (animated) {
+                int duration = mSearchDropTargetBar.getTransitionInDuration();
+                mHotseat.animate().alpha(1f).setDuration(duration);
+            } else {
+                mHotseat.setAlpha(1f);
+            }
+        }
+    }
+
+    /**
+     * Hides the hotseat area.
+     */
+    void hideHotseat(boolean animated) {
+        if (!LauncherApplication.isScreenLarge()) {
+            if (animated) {
+                int duration = mSearchDropTargetBar.getTransitionOutDuration();
+                mHotseat.animate().alpha(0f).setDuration(duration);
+            } else {
+                mHotseat.setAlpha(0f);
+            }
+        }
+    }
+
     /**
      * Add an item from all apps or customize onto the given workspace screen.
      * If layout is null, add to the current screen.
@@ -2537,8 +2563,6 @@ public final class Launcher extends Activity
     void addExternalItemToScreen(ItemInfo itemInfo, final CellLayout layout) {
         if (!mWorkspace.addExternalItemToScreen(itemInfo, layout)) {
             showOutOfSpaceMessage();
-        } else {
-            layout.animateDrop();
         }
     }
 
@@ -2581,21 +2605,25 @@ public final class Launcher extends Activity
     // if successful in getting icon, return it; otherwise, set button to use default drawable
     private Drawable.ConstantState updateTextButtonWithIconFromExternalActivity(
             int buttonId, ComponentName activityName, int fallbackDrawableId) {
-        TextView button = (TextView) findViewById(buttonId);
         Drawable toolbarIcon = getExternalPackageToolbarIcon(activityName);
         Resources r = getResources();
         int w = r.getDimensionPixelSize(R.dimen.toolbar_external_icon_width);
         int h = r.getDimensionPixelSize(R.dimen.toolbar_external_icon_height);
 
+        TextView button = (TextView) findViewById(buttonId);
         // If we were unable to find the icon via the meta-data, use a generic one
         if (toolbarIcon == null) {
             toolbarIcon = r.getDrawable(fallbackDrawableId);
             toolbarIcon.setBounds(0, 0, w, h);
-            button.setCompoundDrawables(toolbarIcon, null, null, null);
+            if (button != null) {
+                button.setCompoundDrawables(toolbarIcon, null, null, null);
+            }
             return null;
         } else {
             toolbarIcon.setBounds(0, 0, w, h);
-            button.setCompoundDrawables(toolbarIcon, null, null, null);
+            if (button != null) {
+                button.setCompoundDrawables(toolbarIcon, null, null, null);
+            }
             return toolbarIcon.getConstantState();
         }
     }
@@ -2630,6 +2658,16 @@ public final class Launcher extends Activity
         button.setImageDrawable(d.newDrawable(getResources()));
     }
 
+    private void invalidatePressedFocusedStates(View container, View button) {
+        if (container instanceof HolographicLinearLayout) {
+            HolographicLinearLayout layout = (HolographicLinearLayout) container;
+            layout.invalidatePressedFocusedStates();
+        } else if (button instanceof HolographicImageView) {
+            HolographicImageView view = (HolographicImageView) button;
+            view.invalidatePressedFocusedStates();
+        }
+    }
+
     private boolean updateGlobalSearchIcon() {
         final View searchButtonContainer = findViewById(R.id.search_button_container);
         final ImageView searchButton = (ImageView) findViewById(R.id.search_button);
@@ -2647,6 +2685,7 @@ public final class Launcher extends Activity
             if (searchDivider != null) searchDivider.setVisibility(View.VISIBLE);
             if (searchButtonContainer != null) searchButtonContainer.setVisibility(View.VISIBLE);
             searchButton.setVisibility(View.VISIBLE);
+            invalidatePressedFocusedStates(searchButtonContainer, searchButton);
             return true;
         } else {
             // We disable both search and voice search when there is no global search provider
@@ -2660,7 +2699,10 @@ public final class Launcher extends Activity
     }
 
     private void updateGlobalSearchIcon(Drawable.ConstantState d) {
+        final View searchButtonContainer = findViewById(R.id.search_button_container);
+        final View searchButton = (ImageView) findViewById(R.id.search_button);
         updateButtonWithDrawable(R.id.search_button, d);
+        invalidatePressedFocusedStates(searchButtonContainer, searchButton);
     }
 
     private boolean updateVoiceSearchIcon(boolean searchVisible) {
@@ -2678,6 +2720,7 @@ public final class Launcher extends Activity
             if (searchDivider != null) searchDivider.setVisibility(View.VISIBLE);
             if (voiceButtonContainer != null) voiceButtonContainer.setVisibility(View.VISIBLE);
             voiceButton.setVisibility(View.VISIBLE);
+            invalidatePressedFocusedStates(voiceButtonContainer, voiceButton);
             return true;
         } else {
             if (searchDivider != null) searchDivider.setVisibility(View.GONE);
@@ -2688,7 +2731,10 @@ public final class Launcher extends Activity
     }
 
     private void updateVoiceSearchIcon(Drawable.ConstantState d) {
+        final View voiceButtonContainer = findViewById(R.id.voice_button_container);
+        final View voiceButton = findViewById(R.id.voice_button);
         updateButtonWithDrawable(R.id.voice_button, d);
+        invalidatePressedFocusedStates(voiceButtonContainer, voiceButton);
     }
 
     /**
@@ -2870,6 +2916,7 @@ public final class Launcher extends Activity
             final CellLayout layoutParent = (CellLayout) workspace.getChildAt(i);
             layoutParent.removeAllViewsInLayout();
         }
+        mWidgetsToAdvance.clear();
         if (mHotseat != null) {
             mHotseat.resetLayout();
         }
@@ -3137,8 +3184,6 @@ public final class Launcher extends Activity
     /* Cling related */
     private static final String PREFS_KEY = "com.android.launcher2.prefs";
     private boolean isClingsEnabled() {
-        // TEMPORARY: DISABLE CLINGS ON LARGE UI
-        if (LauncherApplication.isScreenLarge()) return false;
         // disable clings when running in a test harness
         if(ActivityManager.isRunningInTestHarness()) return false;
 
@@ -3278,6 +3323,7 @@ public final class Launcher extends Activity
 }
 
 interface LauncherTransitionable {
-    void onLauncherTransitionStart(Launcher l, Animator animation, boolean toWorkspace);
+    // return true if the callee will take care of start the animation by itself
+    boolean onLauncherTransitionStart(Launcher l, Animator animation, boolean toWorkspace);
     void onLauncherTransitionEnd(Launcher l, Animator animation, boolean toWorkspace);
 }
